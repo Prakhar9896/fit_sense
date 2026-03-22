@@ -1,1 +1,0 @@
-if status.sum() >= 1:

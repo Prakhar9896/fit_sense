@@ -4,46 +4,36 @@ import numpy as np
 import time
 import mediapipe as mp
 
-# CONFIGURATION
 FRONT_HOLD_TIME = 10
 SIDE_HOLD_TIME = 10
 DISTANCE_TO_CAMERA_CM = 133.0
 CORRECTION_FACTOR = 1.27
-DEPTH_ADJUST = 1.15  # Compensates for underestimation in side view
-
+DEPTH_ADJUST = 1.15 
 DETECT_INTERVAL = 30
 lk_params = dict(winSize=(15, 15),
                  maxLevel=2,
                  criteria=(cv2.TERM_CRITERIA_EPS | cv2.TERM_CRITERIA_COUNT, 10, 0.03))
 
-BLUR_KERNEL_SIZE = (5, 5) 
+BLUR_KERNEL_SIZE = (5, 5)
 
 
-# Initialize MediaPipe Pose
 mp_pose = mp.solutions.pose
 mp_drawing = mp.solutions.drawing_utils
 pose = mp_pose.Pose(min_detection_confidence=0.5, min_tracking_confidence=0.5)
 
-# Load calibration data
 with np.load("calibration_data.npz") as X:
     camera_matrix, dist_coeffs = [X[i] for i in ("camera_matrix", "dist_coeffs")]
 focal_length = camera_matrix[0, 0]
 
 
-# ----------------------------
-# HELPER FUNCTIONS
-# ----------------------------
 
 def distance_px(p1, p2):
-    """Euclidean distance between 2 points in pixel coordinates."""
     return math.sqrt((p2[0] - p1[0]) ** 2 + (p2[1] - p1[1]) ** 2)
 
 def px_to_cm(px):
-    """Convert pixels → cm using calibration."""
     return (px * DISTANCE_TO_CAMERA_CM * CORRECTION_FACTOR) / focal_length
 
 def predict_size(chest_cm, torso_cm, arm_cm, chest_depth_cm):
-    """Predict T-shirt size from combined front + side measurements."""
     chest_circum = math.pi * (chest_cm + chest_depth_cm) / 2
 
     if chest_circum < 82:
@@ -59,7 +49,6 @@ def predict_size(chest_cm, torso_cm, arm_cm, chest_depth_cm):
     else:
         size = "XXL"
 
-    # Adjust for long torso or big arms
     if torso_cm > 55 and size in ["XS", "S"]:
         size = "M"
     elif arm_cm > 60 and size in ["S", "M"]:
@@ -68,24 +57,15 @@ def predict_size(chest_cm, torso_cm, arm_cm, chest_depth_cm):
     return size, chest_circum
 
 
-# ----------------------------
-# CAPTURE LOGIC
-# ----------------------------
 
 def capture_measurements(phase_name, hold_time, direction_text, measure_depth=False):
-    """
-    Capture stable pose measurements using a hybrid DL (MediaPipe) + CV (Lucas-Kanade) approach.
-    - MediaPipe DETECTS landmarks periodically.
-    - Lucas-Kanade TRACKS landmarks between detections.
-    """
     cap = cv2.VideoCapture(0)
     start_time = None
     measurements = {}
 
-    # --- State variables for LK Tracking ---
     frame_count = 0
-    p0 = np.empty((0, 1, 2), dtype=np.float32) 
-    p0_labels = [] 
+    p0 = np.empty((0, 1, 2), dtype=np.float32)
+    p0_labels = []
     
     ret, old_frame = cap.read()
     if not ret:
@@ -95,13 +75,9 @@ def capture_measurements(phase_name, hold_time, direction_text, measure_depth=Fa
     old_frame = cv2.flip(old_frame, 1)
     old_gray = cv2.cvtColor(old_frame, cv2.COLOR_BGR2GRAY)
     
-    # --- ✅ ADDED BLUR ---
-    # We blur the 'old_gray' frame before tracking
     old_gray = cv2.GaussianBlur(old_gray, BLUR_KERNEL_SIZE, 0)
-    # --------------------
 
     track_mask = np.zeros_like(old_frame)
-    # ----------------------------------------
 
     landmarks_to_find = {
         "L_SH": mp_pose.PoseLandmark.LEFT_SHOULDER,
@@ -122,31 +98,20 @@ def capture_measurements(phase_name, hold_time, direction_text, measure_depth=Fa
         h, w, _ = frame.shape
         frame_gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
         
-        # --- ✅ ADDED BLUR ---
-        # We also blur the 'frame_gray' (current) frame before tracking
         frame_gray = cv2.GaussianBlur(frame_gray, BLUR_KERNEL_SIZE, 0)
-        # --------------------
-
-        display_frame = frame.copy() 
+        display_frame = frame.copy()
         frame_count += 1
 
         landmarks_available = False
         current_landmarks_px = {}
         
-        # --------------------------------
-        # --- 1. HYBRID LOGIC: DETECT or TRACK ---
-        # --------------------------------
-
         if frame_count % DETECT_INTERVAL == 0 or p0.shape[0] == 0:
-            # --- PHASE: DETECT (Heavy) ---
             cv2.putText(display_frame, "DETECTING...", (w - 150, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 0, 255), 2)
             
-            # Note: MediaPipe runs on the *original* RGB frame, not the blurred one.
-            # This is good, as we want the detector to have the cleanest image.
-            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB) 
+            rgb = cv2.cvtColor(frame, cv2.COLOR_BGR2RGB)
             pose_results = pose.process(rgb)
-            track_mask = np.zeros_like(old_frame) 
+            track_mask = np.zeros_like(old_frame)
             
             if pose_results.pose_landmarks:
                 lm = pose_results.pose_landmarks.landmark
@@ -172,17 +137,15 @@ def capture_measurements(phase_name, hold_time, direction_text, measure_depth=Fa
                     p0_labels = []
 
         elif p0.shape[0] > 0:
-            # --- PHASE: TRACK (Light) ---
             cv2.putText(display_frame, "TRACKING (LK)", (w - 180, 30),
                         cv2.FONT_HERSHEY_SIMPLEX, 0.5, (0, 255, 0), 2)
 
-            # LK now runs on the *blurred* gray frames (old_gray and frame_gray)
             p1, st, err = cv2.calcOpticalFlowPyrLK(old_gray, frame_gray, p0, None, **lk_params)
 
             if p1 is not None and st is not None and np.sum(st) > 0:
                 good_new_points = p1[st == 1]
                 good_old_points = p0[st == 1]
-                good_new_labels = [label for i, label in enumerate(p0_labels) if st[i] == 1] 
+                good_new_labels = [label for i, label in enumerate(p0_labels) if st[i] == 1]
                 
                 for i, (new, old) in enumerate(zip(good_new_points, good_old_points)):
                     a, b = new.ravel()
@@ -198,17 +161,13 @@ def capture_measurements(phase_name, hold_time, direction_text, measure_depth=Fa
                 p0 = np.empty((0, 1, 2), dtype=np.float32)
                 p0_labels = []
         
-        # --------------------------------
-        # --- 2. MEASUREMENT LOGIC ---
-        # --------------------------------
-        
         cv2.putText(display_frame, f"{phase_name.upper()} VIEW", (20, 40),
                     cv2.FONT_HERSHEY_SIMPLEX, 1, (0, 255, 255), 2)
         cv2.putText(display_frame, direction_text, (20, 80),
                     cv2.FONT_HERSHEY_SIMPLEX, 0.7, (255, 255, 255), 2)
 
         if landmarks_available:
-            cl = current_landmarks_px 
+            cl = current_landmarks_px
             chest_cm = torso_cm = arm_cm = chest_depth_cm = 0.0
 
             try:
@@ -255,7 +214,7 @@ def capture_measurements(phase_name, hold_time, direction_text, measure_depth=Fa
                         "arm_cm": arm_cm,
                         "chest_depth_cm": chest_depth_cm
                     }
-                    break 
+                    break
             
             except (KeyError, ZeroDivisionError):
                 start_time = None
@@ -267,15 +226,9 @@ def capture_measurements(phase_name, hold_time, direction_text, measure_depth=Fa
             p0 = np.empty((0, 1, 2), dtype=np.float32)
             p0_labels = []
 
-        # --------------------------------
-        # --- 3. DISPLAY AND UPDATE ---
-        # --------------------------------
-        
         img = cv2.add(display_frame, track_mask)
         cv2.imshow(f"{phase_name} Capture", img)
         
-        # We update old_gray with the *current* blurred frame
-        # to be used as the 'previous' frame in the next loop.
         old_gray = frame_gray.copy()
         
         if cv2.waitKey(1) & 0xFF == ord("q"):
@@ -286,10 +239,6 @@ def capture_measurements(phase_name, hold_time, direction_text, measure_depth=Fa
     cv2.destroyAllWindows()
     return measurements
 
-
-# ----------------------------
-# MAIN PROGRAM FLOW
-# ----------------------------
 
 print("\n🧍 STEP 1: FACE THE CAMERA (Front View)")
 print(f"Hold steady for {FRONT_HOLD_TIME} seconds when ready...\n")
@@ -305,7 +254,6 @@ if not side_data:
     print("❌ Side view capture failed.")
     exit()
 
-# Combine data
 chest_depth_cm = side_data["chest_depth_cm"]
 size, chest_circum = predict_size(front_data["chest_cm"], front_data["torso_cm"], front_data["arm_cm"], chest_depth_cm)
 
